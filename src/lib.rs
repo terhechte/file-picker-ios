@@ -6,7 +6,7 @@ use objc::{rc::StrongPtr, runtime::Object};
 use pin_project::pin_project;
 use stable_deref_trait::{CloneStableDeref, StableDeref};
 use std::{
-    ffi::{c_char, c_void, CString},
+    ffi::{c_char, c_void, CStr, CString},
     fmt::Debug,
     future::Future,
     ops::Deref,
@@ -26,20 +26,32 @@ extern "C" {
         extensions: *const *const c_char,
         types_len: usize,
         allow_multiple: bool,
-        closure: unsafe extern "C" fn(*const c_void, usize, *mut c_void),
+        closure: unsafe extern "C" fn(*const c_void, usize, *const c_char, *mut c_void),
         closure_data: *mut c_void,
     ) -> *mut Object;
 }
 
 /// A file handle which contains the content of the file.
 #[derive(Debug, Clone)]
-pub struct FileHandle(Arc<[u8]>);
+pub struct FileHandle(Arc<[u8]>, String);
 
 impl Deref for FileHandle {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
         self.0.deref()
+    }
+}
+
+impl FileHandle {
+    /// The filename of the file.
+    pub fn filename(&self) -> &str {
+        &self.1
+    }
+
+    /// The data of the file.
+    pub fn data(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -56,10 +68,19 @@ fn with_extension_ptrs<T>(extensions: &[&str], f: impl FnOnce(&[*const c_char]) 
     f(&extension_ptrs)
 }
 
-unsafe extern "C" fn pick_file_closure(data: *const c_void, len: usize, closure_data: *mut c_void) {
+unsafe extern "C" fn pick_file_closure(
+    data: *const c_void,
+    len: usize,
+    name: *const c_char,
+    closure_data: *mut c_void,
+) {
     let sender = Box::from_raw(closure_data as *mut oneshot::Sender<Option<FileHandle>>);
     if !data.is_null() {
-        let file_handle = FileHandle(std::slice::from_raw_parts(data as *const u8, len).into());
+        let file_handle = FileHandle(
+            std::slice::from_raw_parts(data as *const u8, len).into(),
+            CStr::from_ptr(name).to_str().unwrap().to_owned(),
+            // CString::new(name as *mut _).unwrap().into_string(),
+        );
         sender.send(Some(file_handle)).ok();
     } else {
         sender.send(None).ok();
@@ -67,7 +88,9 @@ unsafe extern "C" fn pick_file_closure(data: *const c_void, len: usize, closure_
 }
 
 /// Pick one file.
-pub fn pick_file(
+/// # Safety
+/// The `controller` must be a valid `UIViewController`.
+pub unsafe fn pick_file(
     controller: *mut Object,
     extensions: &[&str],
 ) -> impl Future<Output = Option<FileHandle>> + Send + Sync {
@@ -76,6 +99,33 @@ pub fn pick_file(
         let delegate = unsafe {
             StrongPtr::retain(show_browser(
                 controller,
+                extension_ptrs.as_ptr(),
+                extension_ptrs.len(),
+                false,
+                pick_file_closure,
+                Box::into_raw(Box::new(tx)) as *mut _ as *mut c_void,
+            ))
+        };
+        let f = async move {
+            match rx.await {
+                Ok(res) => res,
+                Err(_) => None,
+            }
+        };
+        PickFileFuture { f, delegate }
+    })
+}
+
+/// Pick one file via the root view controller
+pub fn pick_file_root(
+    extensions: &[&str],
+) -> impl Future<Output = Option<FileHandle>> + Send + Sync {
+    println!("pick_file_root");
+    with_extension_ptrs(extensions, |extension_ptrs| {
+        let (tx, rx) = oneshot::channel::<Option<FileHandle>>();
+        let delegate = unsafe {
+            StrongPtr::retain(show_browser(
+                std::ptr::null_mut::<Object>(),
                 extension_ptrs.as_ptr(),
                 extension_ptrs.len(),
                 false,
@@ -114,11 +164,17 @@ impl<F: Future<Output = Option<FileHandle>> + Send + Sync> Future for PickFileFu
 unsafe extern "C" fn pick_files_closure(
     data: *const c_void,
     len: usize,
+    name: *const c_char,
     closure_data: *mut c_void,
 ) {
     let sender = Box::from_raw(closure_data as *mut watch::Sender<Option<FileHandle>>);
     if !data.is_null() {
-        let file_handle = FileHandle(std::slice::from_raw_parts(data as *const u8, len).into());
+        let file_handle = FileHandle(
+            std::slice::from_raw_parts(data as *const u8, len).into(),
+            CStr::from_ptr(name).to_str().unwrap().to_owned(),
+            // String::from_utf8_lossy(CString::from_raw(name as *mut _).into_bytes().as_slice())
+            //     .into_owned(),
+        );
         sender.send(Some(file_handle)).ok();
         std::mem::forget(sender);
     }
@@ -127,7 +183,9 @@ unsafe extern "C" fn pick_files_closure(
 /// Pick multiple files.
 ///
 /// If the picker is cancelled, the stream will be empty.
-pub fn pick_files(
+/// # Safety
+/// The `controller` must be a valid `UIViewController`.
+pub unsafe fn pick_files(
     controller: *mut Object,
     extensions: &[&str],
 ) -> impl Stream<Item = FileHandle> + Send + Sync {
