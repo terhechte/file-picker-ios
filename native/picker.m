@@ -72,9 +72,6 @@ show_browser(UIViewController *__unsafe_unretained __nullable controller,
   }
   FilePickerDelegate *delegate =
       [[FilePickerDelegate alloc] initWithClosure:^(NSData *data, NSString *filename) {
-        NSLog(@"In Delegate");
-        NSLog(@"%@", data);
-        NSLog(@"%@", filename);
         if (data) {
           closure([data bytes], [data length], [filename cStringUsingEncoding: NSUTF8StringEncoding], closure_data);
         } else {

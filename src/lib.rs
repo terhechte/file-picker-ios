@@ -120,7 +120,6 @@ pub unsafe fn pick_file(
 pub fn pick_file_root(
     extensions: &[&str],
 ) -> impl Future<Output = Option<FileHandle>> + Send + Sync {
-    println!("pick_file_root");
     with_extension_ptrs(extensions, |extension_ptrs| {
         let (tx, rx) = oneshot::channel::<Option<FileHandle>>();
         let delegate = unsafe {
